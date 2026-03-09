@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://insight-college-automated-bell-system.netlify.app/sitemap.xml
