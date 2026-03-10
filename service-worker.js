@@ -66,7 +66,6 @@ const urlsToCache = [
   '/script.js',
   'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css',
   'https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap',
-  'https://res.cloudinary.com/dy9ys5okf/image/upload/v1773033808/app_icon_ftwi7s_gwhdvd.png',
   'https://res.cloudinary.com/dy9ys5okf/image/upload/v1773033808/app_icon_ftwi7s_gwhdvd.png'
 ];
 
@@ -184,4 +183,5 @@ self.addEventListener('notificationclick', event => {
       clients.openWindow('/')
     );
   }
+
 });
