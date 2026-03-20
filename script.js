@@ -183,38 +183,130 @@ function simulateMQTTConnection() {
 // Load schedule from database
 async function loadSchedule() {
     try {
+        console.log('📥 Loading schedule from database...');
+        
+        // Fetch from API
         const response = await fetch(`${CONFIG.API_URL}/getSchedule`);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
         const result = await response.json();
+        console.log('📊 Raw schedule data:', result);
 
-        if (result.schedule && result.schedule.periods) {
-            // Reset days schedule
-            Object.keys(daysSchedule).forEach(dayName => {
-                daysSchedule[dayName].periods = [];
-                daysSchedule[dayName].enabled = false;
-            });
-
+        // Reset days schedule but KEEP existing periods structure
+        const previousSchedule = JSON.parse(JSON.stringify(daysSchedule)); // Backup
+        
+        // Initialize days with empty periods first
+        Object.keys(daysSchedule).forEach(dayName => {
+            daysSchedule[dayName].periods = [];
+            daysSchedule[dayName].enabled = false;
+        });
+        
+        if (result.schedule && result.schedule.periods && result.schedule.periods.length > 0) {
+            console.log(`✅ Found ${result.schedule.periods.length} periods in database`);
+            
             // Group periods by day
             result.schedule.periods.forEach(period => {
                 if (daysSchedule[period.day]) {
-                    daysSchedule[period.day].periods.push(period);
+                    // Add period to the appropriate day
+                    daysSchedule[period.day].periods.push({
+                        name: period.name || 'Period',
+                        day: period.day,
+                        startTime: period.startTime,
+                        endTime: period.endTime || period.startTime, // If no end time, use start time + 45 min
+                        duration: period.duration || 5,
+                        scheduleId: period.scheduleId || generateScheduleId(),
+                        bellRang: false
+                    });
+                    
+                    // Mark day as enabled if it has periods
                     daysSchedule[period.day].enabled = true;
+                    
+                    console.log(`   Added period to ${period.day}: ${period.startTime}`);
                 }
             });
-
-            // Check if in exam mode
+            
+            // Check if exam mode is active
             isExamMode = result.schedule.periods.some(p => p.day === 'Exam Day');
-
-            // Initialize UI
-            initializeDays();
-            updatePeriodsCount();
-            calculateNextBell();
+            
+            // Save to localStorage as backup
+            localStorage.setItem('bellSchedule', JSON.stringify(daysSchedule));
+            
+            console.log('✅ Schedule loaded successfully');
+        } else {
+            console.log('ℹ️ No periods found in database, using empty schedule');
+            
+            // If no data in DB but we have local backup, use that
+            const localBackup = localStorage.getItem('bellSchedule');
+            if (localBackup) {
+                try {
+                    const backupSchedule = JSON.parse(localBackup);
+                    Object.assign(daysSchedule, backupSchedule);
+                    console.log('📦 Restored from local backup');
+                } catch (e) {
+                    console.error('Error parsing local backup:', e);
+                }
+            }
         }
-
-    } catch (error) {
-        console.error('Error loading schedule:', error);
-        // Initialize with empty days
+        
+        // Initialize UI with loaded schedule
         initializeDays();
+        updatePeriodsCount();
+        calculateNextBell();
+        
+        // Print summary for debugging
+        printScheduleSummary();
+        
+    } catch (error) {
+        console.error('❌ Error loading schedule:', error);
+        
+        // Fallback to localStorage if API fails
+        try {
+            const savedSchedule = localStorage.getItem('bellSchedule');
+            if (savedSchedule) {
+                const parsed = JSON.parse(savedSchedule);
+                Object.assign(daysSchedule, parsed);
+                console.log('📦 Fallback: Loaded from localStorage');
+                initializeDays();
+                updatePeriodsCount();
+                calculateNextBell();
+            } else {
+                // Initialize with empty days
+                initializeDays();
+            }
+        } catch (e) {
+            console.error('Error loading from localStorage:', e);
+            initializeDays();
+        }
     }
+}
+
+// Helper function to generate schedule ID if missing
+function generateScheduleId() {
+    return 'xxxxxx'.replace(/[x]/g, () => {
+        return Math.floor(Math.random() * 16).toString(16);
+    });
+}
+
+// Print schedule summary for debugging
+function printScheduleSummary() {
+    console.log('\n📊 CURRENT SCHEDULE SUMMARY:');
+    console.log('============================');
+    
+    let totalPeriods = 0;
+    Object.keys(daysSchedule).forEach(dayName => {
+        const count = daysSchedule[dayName].periods.length;
+        if (count > 0) {
+            console.log(`${dayName}: ${count} periods ${daysSchedule[dayName].enabled ? '(ENABLED)' : '(DISABLED)'}`);
+            totalPeriods += count;
+        }
+    });
+    
+    console.log(`TOTAL: ${totalPeriods} periods`);
+    console.log(`Exam Mode: ${isExamMode ? 'YES' : 'NO'}`);
+    console.log('============================\n');
 }
 
 function renderSchedule() {
