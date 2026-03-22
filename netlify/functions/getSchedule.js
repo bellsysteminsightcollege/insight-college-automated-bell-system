@@ -86,7 +86,10 @@ exports.handler = async function(event, context) {
     if (schedules.length === 0) {
       return {
         statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate'
+        },
         body: JSON.stringify({
           schedule: { periods: [] },
           count: 0,
@@ -107,26 +110,56 @@ exports.handler = async function(event, context) {
       }
     });
     
-    // Remove duplicates based on startTime and duration
+    // FIXED: Remove duplicates based on day, startTime, AND duration
+    // This allows same time on different days
     const uniquePeriods = [];
     const seenPeriods = new Set();
     
     allPeriods.forEach(period => {
-      const key = `${period.startTime}-${period.duration}`;
+      // Create unique key including day, startTime, and duration
+      const key = `${period.day || 'unknown'}-${period.startTime}-${period.duration}`;
+      
       if (!seenPeriods.has(key)) {
         seenPeriods.add(key);
         uniquePeriods.push(period);
+        console.log(`✅ Keeping period: ${period.day} ${period.startTime} - ${period.name || 'unnamed'}`);
+      } else {
+        console.log(`⚠️ Removing duplicate: ${period.day} ${period.startTime} - ${period.name || 'unnamed'}`);
       }
+    });
+    
+    // Optional: Sort periods by day and time
+    uniquePeriods.sort((a, b) => {
+      // Define day order
+      const dayOrder = {
+        'Monday': 1, 'Tuesday': 2, 'Wednesday': 3, 'Thursday': 4,
+        'Friday': 5, 'Saturday': 6, 'Sunday': 7, 'Exam Day': 8
+      };
+      
+      const dayCompare = (dayOrder[a.day] || 9) - (dayOrder[b.day] || 9);
+      if (dayCompare !== 0) return dayCompare;
+      
+      // Same day, sort by time
+      return a.startTime.localeCompare(b.startTime);
     });
     
     return {
       statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      },
       body: JSON.stringify({
         schedule: { periods: uniquePeriods },
         count: uniquePeriods.length,
         timestamp: new Date().toISOString(),
-        totalSchedules: schedules.length
+        totalSchedules: schedules.length,
+        debug: {
+          totalPeriodsBeforeDedup: allPeriods.length,
+          totalPeriodsAfterDedup: uniquePeriods.length
+        }
       })
     };
     
