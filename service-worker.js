@@ -123,7 +123,7 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const url = event.request.url;
   
-  // Network-first for API calls (always get fresh data)
+  // Network-first for API calls (never cache)
   if (apiUrls.some(apiUrl => url.includes(apiUrl))) {
     event.respondWith(
       fetch(event.request)
@@ -133,7 +133,7 @@ self.addEventListener('fetch', event => {
         })
         .catch(error => {
           console.log('⚠️ API fetch failed:', error);
-          // For API calls, return error but don't use cache
+          // Return error response
           return new Response(JSON.stringify({ error: 'Network error' }), {
             status: 503,
             headers: { 'Content-Type': 'application/json' }
@@ -148,7 +148,7 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetch(event.request)
         .then(response => {
-          // Clone the response
+          // Clone BEFORE reading the body - FIXED
           const responseToCache = response.clone();
           
           // Update cache with new version
@@ -177,20 +177,33 @@ self.addEventListener('fetch', event => {
     caches.match(event.request)
       .then(cachedResponse => {
         // Return cached version immediately
-        const fetchPromise = fetch(event.request)
+        if (cachedResponse) {
+          // Update cache in background
+          fetch(event.request)
+            .then(networkResponse => {
+              // Clone BEFORE putting in cache - FIXED
+              const responseToCache = networkResponse.clone();
+              caches.open(CACHE_NAME).then(cache => {
+                cache.put(event.request, responseToCache);
+              });
+            })
+            .catch(error => {
+              console.log('⚠️ Background update failed for:', url);
+            });
+          
+          return cachedResponse;
+        }
+        
+        // No cache, fetch from network
+        return fetch(event.request)
           .then(networkResponse => {
-            // Update cache with new version
+            // Clone BEFORE putting in cache - FIXED
+            const responseToCache = networkResponse.clone();
             caches.open(CACHE_NAME).then(cache => {
-              cache.put(event.request, networkResponse.clone());
+              cache.put(event.request, responseToCache);
             });
             return networkResponse;
-          })
-          .catch(error => {
-            console.log('⚠️ Network fetch failed for:', url);
           });
-        
-        // Return cached version, but update in background
-        return cachedResponse || fetchPromise;
       })
   );
 });
