@@ -345,65 +345,97 @@ async function savePeriod(e) {
     e.preventDefault();
     
     const dayName = document.getElementById('periodDay').value;
-    const period = {
-        name: document.getElementById('periodName').value || `Period ${daysSchedule[dayName].periods.length + 1}`,
-        day: dayName,
-        startTime: document.getElementById('startTime').value,
-        endTime: document.getElementById('endTime').value,
-        duration: parseInt(document.getElementById('bellDuration').value),
-        scheduleId: generateScheduleId(),
-        bellRang: false
-    };
+    const periodName = document.getElementById('periodName').value;
+    const startTime = document.getElementById('startTime').value;
+    const endTime = document.getElementById('endTime').value;
+    const bellDuration = parseInt(document.getElementById('bellDuration').value);
     
-    // Validate time
-    if (period.startTime >= period.endTime) {
+    // Validate inputs
+    if (!dayName) {
+        showNotification('Please select a day', 'error');
+        return;
+    }
+    
+    if (!periodName) {
+        showNotification('Please enter a period name', 'error');
+        return;
+    }
+    
+    if (startTime >= endTime) {
         showNotification('End time must be after start time', 'error');
         return;
     }
     
-    // Check for duplicate time in same day
-    const duplicate = daysSchedule[dayName].periods.some(p => p.startTime === period.startTime);
-    if (duplicate) {
-        showNotification('A period already exists at this time', 'error');
+    // Check for duplicate periods on the SAME day only
+    const existingPeriod = daysSchedule[dayName].periods.find(p => 
+        p.startTime === startTime
+    );
+    
+    if (existingPeriod) {
+        showNotification(`A period already exists on ${dayName} at ${startTime}`, 'error');
         return;
     }
     
-    // Add period to the day (APPEND, don't replace)
+    const period = {
+        name: periodName,
+        day: dayName,
+        startTime: startTime,
+        endTime: endTime,
+        duration: bellDuration
+    };
+    
+    console.log(`Adding period: ${dayName} ${startTime} - ${endTime}`);
+    
+    // Add period to the day
     daysSchedule[dayName].periods.push(period);
     
-    // Auto-enable the day if it's not enabled
-    if (!daysSchedule[dayName].enabled && dayName !== 'Exam Day') {
-        daysSchedule[dayName].enabled = true;
-    }
+    // Sort periods by time
+    daysSchedule[dayName].periods.sort((a, b) => {
+        return a.startTime.localeCompare(b.startTime);
+    });
     
     // Update the day card
     updateDayCard(dayName);
     
-    // Save to database (MERGE with existing, not replace)
-    await updateScheduleInDatabase('append');
-    
-    // Save to localStorage as backup
-    localStorage.setItem('bellSchedule', JSON.stringify(daysSchedule));
+    // Save to database if day is enabled
+    if (daysSchedule[dayName].enabled) {
+        await updateScheduleInDatabase();
+    } else {
+        // Just save to local storage/SPIFFS
+        saveScheduleToLocalStorage();
+    }
     
     // Close modal and reset form
     document.getElementById('addPeriodModal').style.display = 'none';
     document.getElementById('periodForm').reset();
     
-    showNotification('Period saved successfully!', 'success');
+    showNotification(`Period added to ${dayName} successfully!`, 'success');
     
-    // Print updated summary
-    printScheduleSummary();
+    // Update counts
+    updatePeriodsCount();
+    calculateNextBell();
 }
 
 async function sendScheduleToESP32() {
     try {
         const periods = getAllEnabledPeriods();
-
-        const response = await fetch(`${CONFIG.API_URL}/scheduleQueue`, {
+        
+        // Validate periods before sending
+        if (periods.length === 0) {
+            console.log('No periods to send');
+            return;
+        }
+        
+        // Log what we're sending for debugging
+        console.log('Sending periods:', periods);
+        
+        const timestamp = new Date().getTime();
+        const response = await fetch(`${CONFIG.API_URL}/scheduleQueue?_=${timestamp}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${user.token.access_token}`
+                'Authorization': `Bearer ${user.token.access_token}`,
+                'Cache-Control': 'no-cache'
             },
             body: JSON.stringify({
                 periods: periods,
@@ -411,21 +443,22 @@ async function sendScheduleToESP32() {
                 type: 'full_schedule_update'
             })
         });
-
+        
         if (response.status === 401 || response.status === 403) {
             showNotification('Session expired. Please log in again.', 'error');
             netlifyIdentity.logout();
             return;
         }
-
+        
         if (!response.ok) {
-            throw new Error('Failed to send schedule');
+            const errorText = await response.text();
+            throw new Error(`Server responded with ${response.status}: ${errorText}`);
         }
-
+        
         const result = await response.json();
         console.log('✅ Schedule sent and stored:', result);
         showNotification(`Schedule sent (${periods.length} periods)`, 'success');
-
+        
     } catch (error) {
         console.error('Error sending schedule:', error);
         showNotification('Failed to send schedule', 'error');
@@ -837,28 +870,22 @@ function openAddPeriodModal(dayName) {
 
 async function deletePeriodFromDay(dayName, periodIndex) {
     if (confirm('Are you sure you want to delete this period?')) {
-        // Remove period
+        const period = daysSchedule[dayName].periods[periodIndex];
+        console.log(`Deleting period: ${dayName} ${period.startTime} - ${period.name}`);
+        
         daysSchedule[dayName].periods.splice(periodIndex, 1);
-        
-        // If day has no periods left, optionally disable it
-        if (daysSchedule[dayName].periods.length === 0 && dayName !== 'Exam Day') {
-            daysSchedule[dayName].enabled = false;
-        }
-        
-        // Update UI
         updateDayCard(dayName);
         
-        // Update database (merge mode)
         if (daysSchedule[dayName].enabled) {
-            await updateScheduleInDatabase('merge');
+            await updateScheduleInDatabase();
         } else {
-            await updateScheduleInDatabase('replace');
+            saveScheduleToLocalStorage();
         }
         
-        // Save to localStorage
-        localStorage.setItem('bellSchedule', JSON.stringify(daysSchedule));
+        updatePeriodsCount();
+        calculateNextBell();
         
-        showNotification('Period deleted successfully!', 'success');
+        showNotification(`Period deleted from ${dayName}`, 'success');
     }
 }
 
@@ -878,18 +905,29 @@ function updateDayCard(dayName) {
 // Get all enabled periods
 function getAllEnabledPeriods() {
     const allPeriods = [];
-
+    const seenKeys = new Set(); // Track unique day+time combinations
+    
     Object.keys(daysSchedule).forEach(dayName => {
         if (daysSchedule[dayName].enabled && daysSchedule[dayName].periods.length > 0) {
             daysSchedule[dayName].periods.forEach(period => {
-                allPeriods.push({
-                    ...period,
-                    day: dayName
-                });
+                // Create unique key with day and startTime
+                const key = `${dayName}-${period.startTime}`;
+                
+                // Only add if we haven't seen this day+time combination
+                if (!seenKeys.has(key)) {
+                    seenKeys.add(key);
+                    allPeriods.push({
+                        ...period,
+                        day: dayName
+                    });
+                } else {
+                    console.warn(`⚠️ Skipping duplicate period: ${dayName} ${period.startTime}`);
+                }
             });
         }
     });
-
+    
+    console.log(`📊 Total enabled periods: ${allPeriods.length}`);
     return allPeriods;
 }
 
@@ -941,94 +979,48 @@ async function clearDayFromDatabase(dayName) {
 }
 
 // Update schedule in database
-async function updateScheduleInDatabase(mode = 'merge') {
-    // Get all periods from enabled days
-    let periodsToSave = [];
+async function updateScheduleInDatabase() {
+    const periods = getAllEnabledPeriods();
     
-    if (isExamMode) {
-        // In exam mode, only save Exam Day periods
-        periodsToSave = daysSchedule['Exam Day'].periods.map(p => ({
-            ...p,
-            day: 'Exam Day'
-        }));
-    } else {
-        // In regular mode, save all enabled days' periods
-        Object.keys(daysSchedule).forEach(dayName => {
-            if (dayName !== 'Exam Day' && daysSchedule[dayName].enabled) {
-                periodsToSave = periodsToSave.concat(
-                    daysSchedule[dayName].periods.map(p => ({
-                        ...p,
-                        day: dayName
-                    }))
-                );
-            }
-        });
-    }
-    
-    if (periodsToSave.length === 0) {
-        // If no periods to save, clear database
-        await clearDatabase();
-        showNotification('No enabled periods to save', 'warning');
+    if (periods.length === 0) {
+        console.log('No enabled periods to save');
+        // Clear database if no periods
+        await clearDatabaseAndUpdateSchedule();
         return;
     }
     
-    try {
-        let response;
-        
-        if (mode === 'append') {
-            // For append mode, first get existing schedule then merge
-            const existingResponse = await fetch(`${CONFIG.API_URL}/getSchedule`);
-            const existingData = await existingResponse.json();
-            
-            let allPeriods = [];
-            
-            // Add existing periods
-            if (existingData.schedule && existingData.schedule.periods) {
-                allPeriods = existingData.schedule.periods;
-            }
-            
-            // Add new periods (avoid duplicates)
-            periodsToSave.forEach(newPeriod => {
-                const exists = allPeriods.some(p => 
-                    p.day === newPeriod.day && p.startTime === newPeriod.startTime
-                );
-                
-                if (!exists) {
-                    allPeriods.push(newPeriod);
-                }
-            });
-            
-            // Send merged schedule
-            response = await fetch(`${CONFIG.API_URL}/scheduleQueue`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${user.token.access_token}`
-                },
-                body: JSON.stringify({
-                    periods: allPeriods,
-                    timestamp: new Date().toISOString(),
-                    type: 'full_schedule_update',
-                    mode: isExamMode ? 'exam' : 'regular'
-                })
-            });
-            
+    // Log periods being sent for debugging
+    console.log('📤 Sending periods to database:', periods);
+    
+    // Check for duplicates before sending
+    const uniquePeriods = [];
+    const seenKeys = new Set();
+    
+    for (const period of periods) {
+        const key = `${period.day}-${period.startTime}`;
+        if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            uniquePeriods.push(period);
         } else {
-            // For replace mode (toggle days, exam mode changes)
-            response = await fetch(`${CONFIG.API_URL}/scheduleQueue`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${user.token.access_token}`
-                },
-                body: JSON.stringify({
-                    periods: periodsToSave,
-                    timestamp: new Date().toISOString(),
-                    type: 'full_schedule_update',
-                    mode: isExamMode ? 'exam' : 'regular'
-                })
-            });
+            console.warn(`⚠️ Duplicate found and removed: ${period.day} ${period.startTime}`);
         }
+    }
+    
+    try {
+        const timestamp = new Date().getTime();
+        const response = await fetch(`${CONFIG.API_URL}/scheduleQueue?_=${timestamp}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${user.token.access_token}`,
+                'Cache-Control': 'no-cache'
+            },
+            body: JSON.stringify({
+                periods: uniquePeriods,
+                timestamp: new Date().toISOString(),
+                type: 'full_schedule_update'
+            })
+        });
         
         if (response.status === 401 || response.status === 403) {
             showNotification('Session expired. Please log in again.', 'error');
@@ -1037,23 +1029,19 @@ async function updateScheduleInDatabase(mode = 'merge') {
         }
         
         if (!response.ok) {
-            const errorData = await response.text();
-            throw new Error(`Failed to update schedule: ${errorData}`);
+            throw new Error('Failed to update schedule');
         }
         
         const result = await response.json();
         console.log('✅ Schedule updated in database:', result);
-        showNotification(`Schedule updated (${periodsToSave.length} periods)`, 'success');
+        showNotification(`Schedule updated (${uniquePeriods.length} periods)`, 'success');
         
         // Send to ESP32
         await sendScheduleToESP32();
         
-        // Reload schedule to confirm
-        setTimeout(() => loadSchedule(), 1000);
-        
     } catch (error) {
-        console.error('❌ Error updating schedule:', error);
-        showNotification('Failed to update schedule: ' + error.message, 'error');
+        console.error('Error updating schedule:', error);
+        showNotification('Failed to update schedule', 'error');
     }
 }
 
