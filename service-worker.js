@@ -58,46 +58,62 @@
 // ---------------------------------------------------------------
 
 // Service Worker for Bell System PWA
-const CACHE_NAME = 'ic-bell-system-v1.0';
+const CACHE_NAME = 'bell-system-v2.0'; // Increment version number
 const urlsToCache = [
   '/',
   '/index.html',
   '/style.css',
   '/script.js',
+  '/offline.html',
   'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css',
   'https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap',
   'https://res.cloudinary.com/dy9ys5okf/image/upload/v1773033808/app_icon_ftwi7s_gwhdvd.png'
 ];
 
+// IMPORTANT: DO NOT cache API endpoints
+const apiUrls = [
+  '/.netlify/functions/getSchedule',
+  '/.netlify/functions/scheduleQueue',
+  '/.netlify/functions/ringNow',
+  '/.netlify/functions/clearSchedule',
+  '/.netlify/functions/clearDay'
+];
+
 // Install event
 self.addEventListener('install', event => {
+  console.log('🔄 Service Worker: Installing new version');
+  
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then(cache => {
-        console.log('Service Worker: Caching files');
+        console.log('📦 Service Worker: Caching files');
         return cache.addAll(urlsToCache);
       })
       .then(() => {
-        console.log('Service Worker: All files cached');
+        console.log('✅ Service Worker: Installation complete');
+        // Force the waiting service worker to become active
         return self.skipWaiting();
       })
   );
 });
 
-// Activate event
+// Activate event - Clean up old caches
 self.addEventListener('activate', event => {
+  console.log('🚀 Service Worker: Activating new version');
+  
   event.waitUntil(
     caches.keys().then(cacheNames => {
       return Promise.all(
         cacheNames.map(cache => {
           if (cache !== CACHE_NAME) {
-            console.log('Service Worker: Clearing old cache', cache);
+            console.log('🗑️ Service Worker: Deleting old cache:', cache);
             return caches.delete(cache);
           }
         })
       );
     }).then(() => {
-      console.log('Service Worker: Activated');
+      console.log('✅ Service Worker: Activated and ready');
+      // Take control of all clients immediately
       return self.clients.claim();
     })
   );
@@ -105,48 +121,107 @@ self.addEventListener('activate', event => {
 
 // Fetch event
 self.addEventListener('fetch', event => {
-  // Skip non-GET requests and external URLs
-  if (event.request.method !== 'GET' || 
-      !event.request.url.startsWith(self.location.origin)) {
+  const url = event.request.url;
+  
+  // Network-first for API calls (always get fresh data)
+  if (apiUrls.some(apiUrl => url.includes(apiUrl))) {
+    event.respondWith(
+      fetch(event.request)
+        .then(response => {
+          // Return fresh data from network
+          return response;
+        })
+        .catch(error => {
+          console.log('⚠️ API fetch failed:', error);
+          // For API calls, return error but don't use cache
+          return new Response(JSON.stringify({ error: 'Network error' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        })
+    );
     return;
   }
-
-  event.respondWith(
-    caches.match(event.request)
-      .then(response => {
-        // Return cached version if available
-        if (response) {
-          return response;
-        }
-
-        // Clone the request
-        const fetchRequest = event.request.clone();
-
-        return fetch(fetchRequest).then(response => {
-          // Check if valid response
-          if (!response || response.status !== 200 || response.type !== 'basic') {
-            return response;
-          }
-
+  
+  // For HTML files, use network-first with cache fallback
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request)
+        .then(response => {
           // Clone the response
           const responseToCache = response.clone();
-
-          // Cache the new response
-          caches.open(CACHE_NAME)
-            .then(cache => {
-              cache.put(event.request, responseToCache);
-            });
-
+          
+          // Update cache with new version
+          caches.open(CACHE_NAME).then(cache => {
+            cache.put(event.request, responseToCache);
+          });
+          
           return response;
-        }).catch(() => {
-          // If offline and not in cache, show offline page
-          if (event.request.mode === 'navigate') {
-            return caches.match('/offline.html');
-          }
-        });
+        })
+        .catch(() => {
+          // If network fails, return cached version or offline page
+          return caches.match(event.request)
+            .then(cachedResponse => {
+              if (cachedResponse) {
+                return cachedResponse;
+              }
+              return caches.match('/offline.html');
+            });
+        })
+    );
+    return;
+  }
+  
+  // For static assets (CSS, JS, fonts), use cache-first with network update
+  event.respondWith(
+    caches.match(event.request)
+      .then(cachedResponse => {
+        // Return cached version immediately
+        const fetchPromise = fetch(event.request)
+          .then(networkResponse => {
+            // Update cache with new version
+            caches.open(CACHE_NAME).then(cache => {
+              cache.put(event.request, networkResponse.clone());
+            });
+            return networkResponse;
+          })
+          .catch(error => {
+            console.log('⚠️ Network fetch failed for:', url);
+          });
+        
+        // Return cached version, but update in background
+        return cachedResponse || fetchPromise;
       })
   );
 });
+
+// Handle messages from the page
+self.addEventListener('message', event => {
+  if (event.data === 'skipWaiting') {
+    self.skipWaiting();
+  }
+  
+  // Force refresh all clients when new version is installed
+  if (event.data === 'refreshClients') {
+    self.clients.matchAll().then(clients => {
+      clients.forEach(client => {
+        client.navigate(client.url);
+      });
+    });
+  }
+});
+
+// Background sync for offline operations
+self.addEventListener('sync', event => {
+  if (event.tag === 'sync-schedule') {
+    event.waitUntil(syncSchedule());
+  }
+});
+
+async function syncSchedule() {
+  // Implement background sync logic if needed
+  console.log('🔄 Background sync triggered');
+}
 
 // Handle push notifications
 self.addEventListener('push', event => {
@@ -185,3 +260,4 @@ self.addEventListener('notificationclick', event => {
   }
 
 });
+
